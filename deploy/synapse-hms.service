@@ -1,0 +1,19 @@
+[Unit]
+Description=Synapse Hospital Management System
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=hms
+WorkingDirectory=/opt/synapse-hms
+EnvironmentFile=/opt/synapse-hms/.env
+ExecStart=/usr/bin/npm run start -- --hostname 0.0.0.0 --port 3000
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

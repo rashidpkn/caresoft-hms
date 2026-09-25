@@ -1,0 +1,19 @@
+appId: org.synapse.hms
+productName: Synapse HMS
+files:
+  - electron/**
+directories:
+  output: dist-electron
+win:
+  target:
+    - nsis
+  artifactName: SynapseHMS-Setup-${version}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: Synapse HMS
+linux:
+  target:
+    - AppImage
+extraMetadata:
+  main: electron/main.cjs
