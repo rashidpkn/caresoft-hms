@@ -25,9 +25,12 @@ export async function bookAppointment(ctx: AuthContext, input: unknown) {
   const patient = (await db.select().from(patients).where(eq(patients.id, parsed.patientId)).limit(1))[0];
   if (!patient) throw notFound("Patient not found");
 
-  const weekday = scheduledAt.getDay();
+  const weekday = scheduledAt.getUTCDay();
   const schedules = await db.select().from(doctorSchedules).where(and(eq(doctorSchedules.doctorId, doctor.id), eq(doctorSchedules.weekday, weekday), eq(doctorSchedules.isActive, true)));
   if (schedules.length === 0) throw badRequest("Doctor is not scheduled on this day");
+  const minutesOfDay = scheduledAt.getUTCHours() * 60 + scheduledAt.getUTCMinutes();
+  const withinShift = schedules.some((s) => minutesOfDay >= toMinutes(s.startTime) && minutesOfDay < toMinutes(s.endTime));
+  if (!withinShift) throw badRequest("Time is outside the doctor's working hours");
 
   const overlap = await db
     .select({ id: appointments.id })
@@ -174,6 +177,70 @@ export async function setQueueStatus(ctx: AuthContext, queueId: string, status: 
   }
   await writeAudit({ ctx, action: "queue_" + status, module: "appointment", entity: "queue", entityId: queueId, result: "success" });
   return row;
+}
+
+function toMinutes(time: string): number {
+  const [h, m] = time.split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+
+/**
+ * Appointment times are stored as UTC instants but treated as hospital wall-clock,
+ * so a server running in the hospital timezone and the schedule table agree.
+ */
+export async function availableSlots(doctorId: string, date: string): Promise<{ startsAt: string; label: string; taken: boolean }[]> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw badRequest("date must be YYYY-MM-DD");
+  const db = getDb();
+  const dayStart = new Date(`${date}T00:00:00.000Z`);
+  if (Number.isNaN(dayStart.getTime())) throw badRequest("Invalid date");
+  const weekday = dayStart.getUTCDay();
+  const schedules = await db
+    .select()
+    .from(doctorSchedules)
+    .where(and(eq(doctorSchedules.doctorId, doctorId), eq(doctorSchedules.weekday, weekday), eq(doctorSchedules.isActive, true)))
+    .orderBy(doctorSchedules.startTime);
+  if (schedules.length === 0) return [];
+
+  const booked = await db
+    .select({ scheduledAt: appointments.scheduledAt })
+    .from(appointments)
+    .where(and(
+      eq(appointments.doctorId, doctorId),
+      gte(appointments.scheduledAt, dayStart),
+      lte(appointments.scheduledAt, new Date(`${date}T23:59:59.999Z`)),
+      sql`${appointments.status} not in ('cancelled', 'no_show')`,
+    ));
+  const takenSet = new Set(booked.map((b) => b.scheduledAt.toISOString()));
+
+  const slots: { startsAt: string; label: string; taken: boolean }[] = [];
+  for (const schedule of schedules) {
+    const step = schedule.slotMinutes > 0 ? schedule.slotMinutes : 15;
+    for (let m = toMinutes(schedule.startTime); m + step <= toMinutes(schedule.endTime); m += step) {
+      const hh = String(Math.floor(m / 60)).padStart(2, "0");
+      const mm = String(m % 60).padStart(2, "0");
+      const startsAt = new Date(`${date}T${hh}:${mm}:00.000Z`).toISOString();
+      slots.push({ startsAt, label: `${hh}:${mm}`, taken: takenSet.has(startsAt) });
+    }
+  }
+  return slots;
+}
+
+export async function myDoctorProfile(userId: string) {
+  const db = getDb();
+  const rows = await db
+    .select({
+      id: doctors.id,
+      userId: doctors.userId,
+      fullName: users.fullName,
+      specialization: doctors.specialization,
+      consultationFeeCents: doctors.consultationFeeCents,
+      followUpFeeCents: doctors.followUpFeeCents,
+    })
+    .from(doctors)
+    .innerJoin(users, eq(doctors.userId, users.id))
+    .where(eq(doctors.userId, userId))
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 export async function listSchedules(doctorId: string) {

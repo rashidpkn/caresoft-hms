@@ -17,11 +17,13 @@ import {
 } from "@/server/services/user-service";
 import { getPatient, registerPatient, searchPatients, updatePatient } from "@/server/services/patient-service";
 import {
+  availableSlots,
   bookAppointment,
   checkIn,
   listAppointments,
   listQueue,
   listSchedules,
+  myDoctorProfile,
   rescheduleAppointment,
   saveSchedules,
   setQueueStatus,
@@ -38,11 +40,14 @@ import {
 } from "@/server/services/encounter-service";
 import {
   adjustStock,
+  dispensableStock,
+  getSaleDetail,
   listBatches,
   listCategories,
   listMedicines,
   listMovements,
   listPurchases,
+  listSales,
   listSuppliers,
   receivePurchase,
   saleReturn,
@@ -74,7 +79,8 @@ import {
   upsertLabTest,
   verifyResult,
 } from "@/server/services/lab-service";
-import { dashboardFor, reportAppointments, reportAudit, reportConsultations, reportLab, reportPatients, reportPharmacyStock, searchAudit } from "@/server/services/report-service";
+import { reportAppointments, reportAudit, reportConsultations, reportLab, reportPatients, reportPharmacyStock, reportRevenue, searchAudit } from "@/server/services/report-service";
+import { dashboardFor, labWorklist } from "@/server/services/dashboard-service";
 import { createBackup, listBackups, restoreBackup } from "@/server/services/backup-service";
 import { getSettings, healthCheck, setSetting } from "@/server/services/health-service";
 import { ALL_PERMISSIONS } from "@/server/auth/permissions";
@@ -236,11 +242,23 @@ export async function dispatch(req: Request): Promise<Response> {
     "GET:reports/pharmacy": apiRoute({ permission: "reports.pharmacy", csrf: false }, async () => reportPharmacyStock()),
     "GET:reports/lab": apiRoute({ permission: "reports.lab", csrf: false }, async (req) => reportLab(...range(req))),
     "GET:reports/audit": apiRoute({ permission: "reports.audit", csrf: false }, async (req) => reportAudit(...range(req))),
+    "GET:reports/revenue": apiRoute({ permission: "reports.financial", csrf: false }, async (req) => reportRevenue(...range(req))),
     "GET:audit": apiRoute({ permission: "audit.view", csrf: false }, async (req) => {
       const q = parseSearch(req);
       return searchAudit({ q: q.get("q") ?? undefined, module: q.get("module") ?? undefined });
     }),
-    "GET:dashboard": apiRoute({ permission: "dashboard.view", csrf: false }, async (_req, ctx) => dashboardFor(ctx!.user.roleCode, ctx!.user.id)),
+    "GET:dashboard": apiRoute({ permission: "dashboard.view", csrf: false }, async (_req, ctx) => dashboardFor(ctx!.user)),
+    "GET:lab/worklist": apiRoute({ permission: "lab.order.view", csrf: false }, async (_req, ctx) => labWorklist(ctx!.user)),
+    "GET:doctors/me": apiRoute({ auth: true, csrf: false }, async (_req, ctx) => myDoctorProfile(ctx!.user.id)),
+    "GET:appointments/slots": apiRoute({ permission: "appointment.view", csrf: false }, async (req) => {
+      const q = parseSearch(req);
+      const doctorId = q.get("doctorId");
+      const date = q.get("date");
+      if (!doctorId || !date) throw badRequest("doctorId and date are required");
+      return availableSlots(doctorId, date);
+    }),
+    "GET:pharmacy/stock": apiRoute({ permission: "pharmacy.sale.create", csrf: false }, async (req) => dispensableStock(parseSearch(req).get("q") ?? undefined)),
+    "GET:pharmacy/sales": apiRoute({ permission: "pharmacy.sale.create", csrf: false }, async () => listSales()),
     "POST:encounters": apiRoute({ permission: "consultation.create" }, async (req, ctx) => startEncounter(ctx!, await readJson(req))),
     "POST:encounters/vitals": apiRoute({ permission: "vitals.record" }, async (req, ctx) => recordVitals(ctx!, await readJson(req))),
     "POST:encounters/prescriptions": apiRoute({ permission: "prescription.create" }, async (req, ctx) => addPrescription(ctx!, await readJson(req))),
@@ -325,6 +343,9 @@ export async function dispatch(req: Request): Promise<Response> {
   }
   if (parts[0] === "lab" && parts[1] === "orders" && parts[2] && req.method === "GET") {
     return apiRoute({ permission: "lab.order.view", csrf: false }, async () => getLabOrder(parts[2]))(req);
+  }
+  if (parts[0] === "pharmacy" && parts[1] === "sales" && parts[2] && req.method === "GET") {
+    return apiRoute({ permission: "pharmacy.sale.create", csrf: false }, async () => getSaleDetail(parts[2]))(req);
   }
 
   if (key === "GET:health/public") {

@@ -1,7 +1,7 @@
 import { desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db/client";
-import { labCategories, labOrderItems, labOrders, labResults, labSamples, labTests } from "@/db/schema";
+import { labCategories, labOrderItems, labOrders, labResults, labSamples, labTests, patients } from "@/db/schema";
 import { writeAudit } from "../audit";
 import { badRequest, notFound } from "../errors";
 import type { AuthContext } from "../auth/session";
@@ -216,8 +216,22 @@ export async function verifyResult(ctx: AuthContext, resultId: string) {
 
 export async function getLabOrder(id: string) {
   const db = getDb();
-  const order = (await db.select().from(labOrders).where(eq(labOrders.id, id)).limit(1))[0];
-  if (!order) throw notFound();
+  const orderRows = await db
+    .select({
+      order: labOrders,
+      patientMrn: patients.mrn,
+      patientFirstName: patients.firstName,
+      patientLastName: patients.lastName,
+      patientSex: patients.sex,
+      patientDob: patients.dateOfBirth,
+    })
+    .from(labOrders)
+    .innerJoin(patients, eq(labOrders.patientId, patients.id))
+    .where(eq(labOrders.id, id))
+    .limit(1);
+  const orderRow = orderRows[0];
+  if (!orderRow) throw notFound("Lab order not found");
+  const order = orderRow.order;
   const items = await db.select().from(labOrderItems).where(eq(labOrderItems.orderId, id));
   const tests = items.length ? await db.select().from(labTests).where(inArray(labTests.id, items.map((i) => i.testId))) : [];
   const testMap = new Map(tests.map((t) => [t.id, t]));
@@ -227,6 +241,12 @@ export async function getLabOrder(id: string) {
   const samples = await db.select().from(labSamples).where(eq(labSamples.orderId, id));
   return {
     order,
+    patient: {
+      mrn: orderRow.patientMrn,
+      fullName: `${orderRow.patientFirstName} ${orderRow.patientLastName}`,
+      sex: orderRow.patientSex,
+      dateOfBirth: orderRow.patientDob,
+    },
     items: items.map((i) => ({
       ...i,
       test: testMap.get(i.testId) ?? null,

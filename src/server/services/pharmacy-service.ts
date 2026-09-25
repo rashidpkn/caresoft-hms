@@ -11,6 +11,7 @@ import {
   payments,
   purchaseItems,
   purchases,
+  refunds,
   suppliers,
 } from "@/db/schema";
 import { writeAudit } from "../audit";
@@ -365,19 +366,38 @@ export async function sellMedicines(ctx: AuthContext, input: unknown) {
 
 export async function saleReturn(ctx: AuthContext, invoiceId: string, items: { batchId: string; quantity: number }[], reason: string) {
   if (!items.length) throw badRequest("Return requires items");
+  if (!reason.trim()) throw badRequest("Return reason is required");
+  if (items.some((i) => !Number.isInteger(i.quantity) || i.quantity <= 0)) throw badRequest("Return quantity must be a positive whole number");
   const db = getDb();
   return db.transaction(async (tx) => {
     const invoice = (await tx.select().from(invoices).where(eq(invoices.id, invoiceId)).for("update"))[0];
     if (!invoice) throw notFound("Invoice not found");
     if (invoice.source !== "pharmacy") throw badRequest("Not a pharmacy invoice");
     if (invoice.status === "cancelled") throw badRequest("Invoice cancelled");
+
+    const soldLines = await tx.select().from(invoiceItems).where(eq(invoiceItems.invoiceId, invoice.id));
+    const priorReturns = await tx
+      .select({ batchId: inventoryMovements.batchId, qty: sql<number>`coalesce(sum(${inventoryMovements.quantityDelta}),0)` })
+      .from(inventoryMovements)
+      .where(and(eq(inventoryMovements.referenceId, invoice.id), eq(inventoryMovements.type, "sale_return")))
+      .groupBy(inventoryMovements.batchId);
+
     let refundCents = 0;
     for (const item of items) {
+      const line = soldLines.find((l) => {
+        const meta = l.metadata ? (JSON.parse(l.metadata) as { batchId?: string }) : {};
+        return meta.batchId === item.batchId;
+      });
+      if (!line) throw badRequest("That batch was not dispensed on this bill");
+      const already = Number(priorReturns.find((r) => r.batchId === item.batchId)?.qty ?? 0);
+      if (item.quantity + already > line.quantity) {
+        throw conflict(`Cannot return more than dispensed for ${line.description}`);
+      }
       const batch = (await tx.select().from(medicineBatches).where(eq(medicineBatches.id, item.batchId)).for("update"))[0];
       if (!batch) throw notFound("Batch not found");
       const qtyAfter = batch.quantityOnHand + item.quantity;
       await tx.update(medicineBatches).set({ quantityOnHand: qtyAfter, updatedAt: new Date() }).where(eq(medicineBatches.id, batch.id));
-      refundCents += item.quantity * batch.unitPriceCents;
+      refundCents += item.quantity * line.unitPriceCents;
       await tx.insert(inventoryMovements).values({
         batchId: batch.id,
         medicineId: batch.medicineId,
@@ -390,17 +410,37 @@ export async function saleReturn(ctx: AuthContext, invoiceId: string, items: { b
         createdBy: ctx.user.id,
       });
     }
-    const newRefunded = invoice.refundedCents + refundCents;
-    if (newRefunded > invoice.paidCents && invoice.paidCents > 0) {
-      // allow refund of goods even if unpaid, but cap recorded refunds at paid+outstanding? keep as recorded returns
+
+    // Money is only refunded for what the patient actually paid.
+    const refundable = invoice.paidCents - invoice.refundedCents;
+    const cashBack = Math.min(refundCents, Math.max(0, refundable));
+    if (cashBack > 0) {
+      const refundNo = await nextFormattedNumber(tx, "refund");
+      await tx.insert(refunds).values({
+        refundNo,
+        invoiceId: invoice.id,
+        amountCents: cashBack,
+        reason,
+        method: "cash",
+        processedBy: ctx.user.id,
+      });
     }
+    const refunded = invoice.refundedCents + cashBack;
     const [updated] = await tx.update(invoices).set({
-      refundedCents: newRefunded,
-      status: newRefunded >= invoice.totalCents ? "refunded" : invoice.status,
+      refundedCents: refunded,
+      status: refunded > 0 && refunded >= invoice.paidCents && invoice.paidCents >= invoice.totalCents ? "refunded" : invoice.status,
       updatedAt: new Date(),
     }).where(eq(invoices.id, invoice.id)).returning();
-    await writeAudit({ ctx, action: "sale_return", module: "pharmacy", entity: "invoice", entityId: invoice.id, newValue: { refundCents, reason }, result: "success" });
-    return updated;
+    await writeAudit({
+      ctx,
+      action: "sale_return",
+      module: "pharmacy",
+      entity: "invoice",
+      entityId: invoice.id,
+      newValue: { goodsValueCents: refundCents, cashRefundedCents: cashBack, reason },
+      result: "success",
+    });
+    return { invoice: updated, goodsValueCents: refundCents, cashRefundedCents: cashBack };
   });
 }
 
@@ -426,6 +466,89 @@ export async function adjustStock(ctx: AuthContext, batchId: string, quantityDel
     await writeAudit({ ctx, action: "adjust", module: "inventory", entity: "batch", entityId: batchId, newValue: { quantityDelta, reason, qtyAfter }, result: "success" });
     return { batchId, quantityOnHand: qtyAfter };
   });
+}
+
+/** Dispensable stock, expiry-first (FEFO) so staff pick the oldest usable batch. */
+export async function dispensableStock(q?: string) {
+  const db = getDb();
+  const filters = [
+    eq(medicineBatches.isActive, true),
+    sql`${medicineBatches.quantityOnHand} > ${medicineBatches.quantityReserved}`,
+    sql`${medicineBatches.expiryDate} >= current_date`,
+  ];
+  if (q) {
+    const term = `%${q}%`;
+    filters.push(sql`(${medicines.name} ilike ${term} or ${medicines.sku} ilike ${term} or ${medicines.genericName} ilike ${term})`);
+  }
+  return db
+    .select({
+      batchId: medicineBatches.id,
+      batchNumber: medicineBatches.batchNumber,
+      medicineId: medicines.id,
+      medicineName: medicines.name,
+      genericName: medicines.genericName,
+      sku: medicines.sku,
+      unit: medicines.unit,
+      strength: medicines.strength,
+      quantityAvailable: sql<number>`${medicineBatches.quantityOnHand} - ${medicineBatches.quantityReserved}`,
+      unitPriceCents: medicineBatches.unitPriceCents,
+      mrpCents: medicineBatches.mrpCents,
+      gstBps: medicineBatches.gstBps,
+      expiryDate: medicineBatches.expiryDate,
+    })
+    .from(medicineBatches)
+    .innerJoin(medicines, eq(medicineBatches.medicineId, medicines.id))
+    .where(and(...filters))
+    .orderBy(medicineBatches.expiryDate)
+    .limit(100);
+}
+
+export async function listSales(limit = 50) {
+  const db = getDb();
+  return db
+    .select({
+      id: invoices.id,
+      invoiceNo: invoices.invoiceNo,
+      status: invoices.status,
+      totalCents: invoices.totalCents,
+      paidCents: invoices.paidCents,
+      refundedCents: invoices.refundedCents,
+      createdAt: invoices.createdAt,
+    })
+    .from(invoices)
+    .where(eq(invoices.source, "pharmacy"))
+    .orderBy(desc(invoices.createdAt))
+    .limit(limit);
+}
+
+/** Sale detail used by the returns screen so the cashier can pick the dispensed lines. */
+export async function getSaleDetail(invoiceId: string) {
+  const db = getDb();
+  const invoice = (await db.select().from(invoices).where(eq(invoices.id, invoiceId)).limit(1))[0];
+  if (!invoice) throw notFound("Sale not found");
+  if (invoice.source !== "pharmacy") throw badRequest("Not a pharmacy sale");
+  const items = await db.select().from(invoiceItems).where(eq(invoiceItems.invoiceId, invoiceId));
+  const returned = await db
+    .select({ batchId: inventoryMovements.batchId, qty: sql<number>`coalesce(sum(${inventoryMovements.quantityDelta}),0)` })
+    .from(inventoryMovements)
+    .where(and(eq(inventoryMovements.referenceId, invoiceId), eq(inventoryMovements.type, "sale_return")))
+    .groupBy(inventoryMovements.batchId);
+  return {
+    invoice,
+    items: items.map((item) => {
+      const meta = item.metadata ? (JSON.parse(item.metadata) as { batchId?: string }) : {};
+      const alreadyReturned = Number(returned.find((r) => r.batchId === meta.batchId)?.qty ?? 0);
+      return {
+        id: item.id,
+        description: item.description,
+        quantity: item.quantity,
+        unitPriceCents: item.unitPriceCents,
+        lineTotalCents: item.lineTotalCents,
+        batchId: meta.batchId ?? null,
+        returnableQuantity: Math.max(0, item.quantity - alreadyReturned),
+      };
+    }),
+  };
 }
 
 export async function listPurchases() {

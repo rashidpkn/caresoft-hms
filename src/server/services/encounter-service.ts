@@ -1,14 +1,17 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db/client";
 import {
   appointments,
   diagnoses,
+  doctors,
   encounters,
+  labOrders,
   patients,
   prescriptionItems,
   prescriptions,
   queues,
+  users,
   vitals,
 } from "@/db/schema";
 import { writeAudit } from "../audit";
@@ -87,50 +90,66 @@ export async function updateEncounter(ctx: AuthContext, id: string, input: unkno
   return getEncounter(id);
 }
 
-export async function recordVitals(ctx: AuthContext, input: {
-  encounterId: string;
-  patientId: string;
-  temperatureC?: string;
-  pulseBpm?: number;
-  respiratoryRate?: number;
-  systolicMmHg?: number;
-  diastolicMmHg?: number;
-  spo2?: number;
-  weightKg?: string;
-  heightCm?: string;
-  notes?: string;
-}) {
+const vitalsSchema = z.object({
+  encounterId: z.string().uuid(),
+  temperatureC: z.coerce.number().min(25).max(45).optional().nullable(),
+  pulseBpm: z.coerce.number().int().min(20).max(250).optional().nullable(),
+  respiratoryRate: z.coerce.number().int().min(4).max(80).optional().nullable(),
+  systolicMmHg: z.coerce.number().int().min(50).max(300).optional().nullable(),
+  diastolicMmHg: z.coerce.number().int().min(20).max(200).optional().nullable(),
+  spo2: z.coerce.number().int().min(40).max(100).optional().nullable(),
+  weightKg: z.coerce.number().min(0.5).max(400).optional().nullable(),
+  heightCm: z.coerce.number().min(20).max(260).optional().nullable(),
+  notes: z.string().max(1000).optional(),
+});
+
+export async function recordVitals(ctx: AuthContext, input: unknown) {
+  const parsed = vitalsSchema.parse(input);
   const db = getDb();
-  const enc = (await db.select().from(encounters).where(eq(encounters.id, input.encounterId)).limit(1))[0];
+  const enc = (await db.select().from(encounters).where(eq(encounters.id, parsed.encounterId)).limit(1))[0];
   if (!enc) throw notFound("Encounter not found");
   assertDraft(enc.status);
+  if (parsed.systolicMmHg && parsed.diastolicMmHg && parsed.diastolicMmHg >= parsed.systolicMmHg) {
+    throw badRequest("Diastolic pressure must be lower than systolic");
+  }
   const [row] = await db.insert(vitals).values({
-    encounterId: input.encounterId,
-    patientId: input.patientId,
+    encounterId: enc.id,
+    patientId: enc.patientId,
     recordedBy: ctx.user.id,
-    temperatureC: input.temperatureC ?? null,
-    pulseBpm: input.pulseBpm ?? null,
-    respiratoryRate: input.respiratoryRate ?? null,
-    systolicMmHg: input.systolicMmHg ?? null,
-    diastolicMmHg: input.diastolicMmHg ?? null,
-    spo2: input.spo2 ?? null,
-    weightKg: input.weightKg ?? null,
-    heightCm: input.heightCm ?? null,
-    notes: input.notes ?? null,
+    temperatureC: parsed.temperatureC != null ? String(parsed.temperatureC) : null,
+    pulseBpm: parsed.pulseBpm ?? null,
+    respiratoryRate: parsed.respiratoryRate ?? null,
+    systolicMmHg: parsed.systolicMmHg ?? null,
+    diastolicMmHg: parsed.diastolicMmHg ?? null,
+    spo2: parsed.spo2 ?? null,
+    weightKg: parsed.weightKg != null ? String(parsed.weightKg) : null,
+    heightCm: parsed.heightCm != null ? String(parsed.heightCm) : null,
+    notes: parsed.notes ?? null,
   }).returning();
   await writeAudit({ ctx, action: "record_vitals", module: "consultation", entity: "vitals", entityId: row.id, result: "success" });
   return row;
 }
 
-export async function addPrescription(ctx: AuthContext, input: {
-  encounterId: string;
-  notes?: string;
-  items: { medicineName: string; medicineId?: string; dosage: string; frequency: string; duration: string; route?: string; quantity?: number; instructions?: string }[];
-}) {
-  if (!input.items.length) throw badRequest("Prescription requires items");
+const prescriptionSchema = z.object({
+  encounterId: z.string().uuid(),
+  notes: z.string().max(1000).optional(),
+  items: z.array(z.object({
+    medicineName: z.string().min(1, "Medicine is required").max(160),
+    medicineId: z.string().uuid().optional().nullable(),
+    dosage: z.string().min(1, "Dosage is required").max(80),
+    frequency: z.string().min(1, "Frequency is required").max(80),
+    duration: z.string().min(1, "Duration is required").max(80),
+    route: z.enum(["oral", "topical", "iv", "im", "sc", "inhalation", "rectal", "ophthalmic"]).optional(),
+    quantity: z.coerce.number().int().min(1).max(1000).optional(),
+    instructions: z.string().max(300).optional(),
+  })).min(1, "Prescription needs at least one medicine"),
+});
+
+export async function addPrescription(ctx: AuthContext, input: unknown) {
+  const parsed = prescriptionSchema.parse(input);
   const db = getDb();
-  const enc = (await db.select().from(encounters).where(eq(encounters.id, input.encounterId)).limit(1))[0];
-  if (!enc) throw notFound();
+  const enc = (await db.select().from(encounters).where(eq(encounters.id, parsed.encounterId)).limit(1))[0];
+  if (!enc) throw notFound("Encounter not found");
   assertDraft(enc.status);
   return db.transaction(async (tx) => {
     const prescriptionNo = await nextFormattedNumber(tx, "prescription");
@@ -139,9 +158,9 @@ export async function addPrescription(ctx: AuthContext, input: {
       encounterId: enc.id,
       patientId: enc.patientId,
       doctorId: enc.doctorId,
-      notes: input.notes ?? null,
+      notes: parsed.notes ?? null,
     }).returning();
-    await tx.insert(prescriptionItems).values(input.items.map((i) => ({
+    await tx.insert(prescriptionItems).values(parsed.items.map((i) => ({
       prescriptionId: rx.id,
       medicineName: i.medicineName,
       medicineId: i.medicineId ?? null,
@@ -179,15 +198,49 @@ export async function finalizeEncounter(ctx: AuthContext, id: string) {
 
 export async function getEncounter(id: string) {
   const db = getDb();
-  const enc = (await db.select().from(encounters).where(eq(encounters.id, id)).limit(1))[0];
-  if (!enc) throw notFound();
+  const rows = await db
+    .select({
+      encounter: encounters,
+      patientMrn: patients.mrn,
+      patientFirstName: patients.firstName,
+      patientLastName: patients.lastName,
+      patientSex: patients.sex,
+      patientDob: patients.dateOfBirth,
+      patientAllergies: patients.allergies,
+      doctorName: users.fullName,
+      doctorSpecialization: doctors.specialization,
+    })
+    .from(encounters)
+    .innerJoin(patients, eq(encounters.patientId, patients.id))
+    .innerJoin(doctors, eq(encounters.doctorId, doctors.id))
+    .innerJoin(users, eq(doctors.userId, users.id))
+    .where(eq(encounters.id, id))
+    .limit(1);
+  const row = rows[0];
+  if (!row) throw notFound("Encounter not found");
   const v = await db.select().from(vitals).where(eq(vitals.encounterId, id)).orderBy(desc(vitals.recordedAt));
   const d = await db.select().from(diagnoses).where(eq(diagnoses.encounterId, id));
-  const rx = await db.select().from(prescriptions).where(eq(prescriptions.encounterId, id));
+  const rx = await db.select().from(prescriptions).where(eq(prescriptions.encounterId, id)).orderBy(desc(prescriptions.createdAt));
   const items = rx.length
-    ? await db.select().from(prescriptionItems).where(eq(prescriptionItems.prescriptionId, rx[0].id))
+    ? await db.select().from(prescriptionItems).where(inArray(prescriptionItems.prescriptionId, rx.map((r) => r.id)))
     : [];
-  return { encounter: enc, vitals: v, diagnoses: d, prescriptions: rx, prescriptionItems: items };
+  const orders = await db.select().from(labOrders).where(eq(labOrders.encounterId, id)).orderBy(desc(labOrders.createdAt));
+  return {
+    encounter: row.encounter,
+    patient: {
+      mrn: row.patientMrn,
+      fullName: `${row.patientFirstName} ${row.patientLastName}`,
+      sex: row.patientSex,
+      dateOfBirth: row.patientDob,
+      allergies: row.patientAllergies,
+    },
+    doctor: { fullName: row.doctorName, specialization: row.doctorSpecialization },
+    vitals: v,
+    diagnoses: d,
+    prescriptions: rx,
+    prescriptionItems: items,
+    labOrders: orders,
+  };
 }
 
 export async function patientTimeline(patientId: string) {

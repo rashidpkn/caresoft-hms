@@ -40,8 +40,8 @@ Opaque hashed sessions, Argon2id, CSRF, disable+revoke, no client DB access, gen
 
 | Suite | Total | Passed | Failed | Skipped |
 | --- | --- | --- | --- | --- |
-| Vitest (unit + integration + security) | 21 | 21 | 0 | 0 |
-| Playwright E2E | 2 | 2 | 0 | 0 |
+| Vitest (unit + integration + security + role modules) | 33 | 33 | 0 | 0 |
+| Playwright E2E (admin, reception, doctor, pharmacy, lab) | 7 | 7 | 0 | 0 |
 | Backup | 1 dump verified (checksum + dump header) | | | |
 | Restore | 1 restore into empty DB recovered 11 users | | | |
 | Concurrent pharmacy | 8 sellers / 5 units → 5 success, 3 conflict, stock 0 | | | |

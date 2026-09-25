@@ -6,21 +6,25 @@ import { useQuery } from "@tanstack/react-query";
 import { api, fetchMe } from "@/lib/api";
 import { Button, SecondaryButton } from "./ui";
 
-const NAV: { href: string; label: string; permission: string }[] = [
-  { href: "/", label: "Dashboard", permission: "dashboard.view" },
-  { href: "/patients", label: "Patients", permission: "patient.view" },
-  { href: "/appointments", label: "Appointments", permission: "appointment.view" },
-  { href: "/queue", label: "Queue", permission: "appointment.view" },
-  { href: "/consultations", label: "Consultation", permission: "consultation.view" },
-  { href: "/pharmacy", label: "Pharmacy", permission: "pharmacy.medicine.view" },
-  { href: "/inventory", label: "Inventory", permission: "inventory.view" },
-  { href: "/billing", label: "Billing", permission: "billing.view" },
-  { href: "/lab", label: "Laboratory", permission: "lab.order.view" },
-  { href: "/reports", label: "Reports", permission: "reports.clinical" },
-  { href: "/users", label: "Users", permission: "user.view" },
-  { href: "/settings", label: "Settings", permission: "settings.manage" },
-  { href: "/audit", label: "Audit", permission: "audit.view" },
-  { href: "/system", label: "System", permission: "health.view" },
+const NAV: { href: string; label: string; anyOf: string[] }[] = [
+  { href: "/", label: "Dashboard", anyOf: ["dashboard.view"] },
+  { href: "/patients", label: "Patients", anyOf: ["patient.view"] },
+  { href: "/appointments", label: "Front desk", anyOf: ["appointment.view"] },
+  { href: "/queue", label: "Queue board", anyOf: ["queue.manage", "appointment.checkin"] },
+  { href: "/consultations", label: "My clinic", anyOf: ["consultation.view"] },
+  { href: "/pharmacy", label: "Pharmacy counter", anyOf: ["pharmacy.sale.create"] },
+  { href: "/inventory", label: "Stock & purchases", anyOf: ["inventory.view", "pharmacy.batch.view"] },
+  { href: "/billing", label: "Billing", anyOf: ["billing.view"] },
+  { href: "/lab", label: "Laboratory", anyOf: ["lab.order.view"] },
+  {
+    href: "/reports",
+    label: "Reports",
+    anyOf: ["reports.clinical", "reports.pharmacy", "reports.financial", "reports.lab", "reports.audit"],
+  },
+  { href: "/users", label: "Staff accounts", anyOf: ["user.view"] },
+  { href: "/settings", label: "Settings", anyOf: ["settings.manage"] },
+  { href: "/audit", label: "Audit log", anyOf: ["audit.view"] },
+  { href: "/system", label: "System health", anyOf: ["health.view"] },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -36,7 +40,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return <div className="p-8 text-slate-600">Connecting to HMS server…</div>;
   }
   const perms = new Set(me.data.user.permissions);
-  const items = NAV.filter((n) => perms.has(n.permission) || (n.href === "/reports" && (perms.has("reports.pharmacy") || perms.has("reports.financial") || perms.has("reports.lab") || perms.has("reports.audit") || perms.has("reports.clinical"))));
+  const items = NAV.filter((n) => n.anyOf.some((p) => perms.has(p)));
 
   return (
     <div className="flex min-h-screen">

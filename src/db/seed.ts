@@ -1,16 +1,26 @@
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import {
+  appointments,
   billableServices,
   departments,
   designations,
   doctors,
   doctorSchedules,
+  inventoryMovements,
   labCategories,
+  labOrderItems,
+  labOrders,
   labTests,
+  medicineBatches,
   medicineCategories,
   medicines,
+  patientContacts,
+  patients,
   permissions,
+  purchaseItems,
+  purchases,
+  queues,
   rolePermissions,
   roles,
   sequences,
@@ -21,7 +31,7 @@ import {
 import { ALL_PERMISSIONS, ROLE_PERMISSIONS, type RoleCode } from "@/server/auth/permissions";
 import { hashPassword } from "@/server/auth/password";
 import { DEFAULT_SETTINGS } from "@/server/services/health-service";
-import { ensureSequences } from "@/server/sequences";
+import { ensureSequences, nextFormattedNumber } from "@/server/sequences";
 
 export async function seedDatabase(opts?: { demoUsers?: boolean }) {
   const db = getDb();
@@ -178,7 +188,161 @@ export async function seedDatabase(opts?: { demoUsers?: boolean }) {
     }
   }
 
+  if (opts?.demoUsers) {
+    await seedDemoWorkload();
+  }
+
   return { ok: true };
+}
+
+/**
+ * Development-only sample workload so every role has something to act on:
+ * patients, a booked and a checked-in appointment, dispensable stock, and a lab order.
+ * Never run this on a live hospital database.
+ */
+async function seedDemoWorkload() {
+  const db = getDb();
+  const existing = await db.select({ id: patients.id }).from(patients).limit(1);
+  if (existing.length > 0) return;
+
+  const doctorRow = (await db.select().from(doctors).limit(1))[0];
+  const supplier = (await db.select().from(suppliers).limit(1))[0];
+  const storeUser = (await db.select().from(users).where(eq(users.username, "store")).limit(1))[0];
+  const receptionUser = (await db.select().from(users).where(eq(users.username, "receptionist")).limit(1))[0];
+  const doctorUser = (await db.select().from(users).where(eq(users.username, "doctor")).limit(1))[0];
+
+  const demoPatients = [
+    { firstName: "Meera", lastName: "Shah", sex: "female", dateOfBirth: "1992-05-14", phone: "9876543210", allergies: "Penicillin" },
+    { firstName: "Rahul", lastName: "Verma", sex: "male", dateOfBirth: "1979-11-02", phone: "9876500011", allergies: null },
+    { firstName: "Fatima", lastName: "Rahman", sex: "female", dateOfBirth: "2015-02-20", phone: "9876500022", allergies: null },
+  ];
+  const created: { id: string; mrn: string }[] = [];
+  for (const p of demoPatients) {
+    const row = await db.transaction(async (tx) => {
+      const mrn = await nextFormattedNumber(tx, "patient_mrn");
+      const [inserted] = await tx.insert(patients).values({
+        mrn,
+        firstName: p.firstName,
+        lastName: p.lastName,
+        sex: p.sex,
+        dateOfBirth: p.dateOfBirth,
+        allergies: p.allergies,
+        registeredBy: receptionUser?.id ?? null,
+      }).returning();
+      await tx.insert(patientContacts).values({ patientId: inserted.id, type: "phone", value: p.phone, isPrimary: true });
+      return inserted;
+    });
+    created.push({ id: row.id, mrn: row.mrn });
+  }
+
+  if (doctorRow) {
+    const today = new Date().toISOString().slice(0, 10);
+    const first = new Date(`${today}T10:00:00.000Z`);
+    const second = new Date(`${today}T10:15:00.000Z`);
+    const [checkedIn] = await db.insert(appointments).values({
+      patientId: created[0].id,
+      doctorId: doctorRow.id,
+      scheduledAt: first,
+      reason: "Fever and cough",
+      status: "checked_in",
+      checkedInAt: new Date(),
+      createdBy: receptionUser?.id ?? null,
+    }).returning();
+    await db.insert(queues).values({
+      doctorId: doctorRow.id,
+      appointmentId: checkedIn.id,
+      patientId: created[0].id,
+      queueDate: today,
+      tokenNumber: 1,
+      status: "waiting",
+    });
+    await db.insert(appointments).values({
+      patientId: created[1].id,
+      doctorId: doctorRow.id,
+      scheduledAt: second,
+      reason: "Blood pressure review",
+      status: "scheduled",
+      createdBy: receptionUser?.id ?? null,
+    });
+  }
+
+  if (supplier) {
+    const meds = await db.select().from(medicines).limit(2);
+    const today = new Date().toISOString().slice(0, 10);
+    await db.transaction(async (tx) => {
+      const purchaseNo = await nextFormattedNumber(tx, "purchase");
+      const [purchase] = await tx.insert(purchases).values({
+        purchaseNo,
+        supplierId: supplier.id,
+        invoiceNo: "DEMO-001",
+        purchasedAt: today,
+        status: "received",
+        createdBy: storeUser?.id ?? null,
+      }).returning();
+      let subtotal = 0;
+      let tax = 0;
+      for (const [index, med] of meds.entries()) {
+        const quantity = index === 0 ? 120 : 8;
+        const purchaseRateCents = 1800;
+        const [batch] = await tx.insert(medicineBatches).values({
+          medicineId: med.id,
+          batchNumber: index === 0 ? "B24A01" : "B24B07",
+          packing: "10 x 10",
+          stripCount: 10,
+          mrpCents: 3500,
+          unitPriceCents: 3200,
+          purchaseRateCents,
+          gstBps: 1200,
+          quantityOnHand: quantity,
+          supplierId: supplier.id,
+          expiryDate: index === 0 ? "2028-06-30" : "2026-12-31",
+          receivedAt: today,
+        }).returning();
+        await tx.insert(inventoryMovements).values({
+          batchId: batch.id,
+          medicineId: med.id,
+          type: "purchase",
+          quantityDelta: quantity,
+          quantityAfter: quantity,
+          referenceType: "purchase",
+          referenceId: purchase.id,
+          createdBy: storeUser?.id ?? null,
+        });
+        const lineGross = quantity * purchaseRateCents;
+        subtotal += lineGross;
+        tax += Math.round((lineGross * 1200) / 10000);
+        await tx.insert(purchaseItems).values({
+          purchaseId: purchase.id,
+          medicineId: med.id,
+          batchId: batch.id,
+          batchNumber: batch.batchNumber,
+          expiryDate: batch.expiryDate,
+          quantity,
+          purchaseRateCents,
+          mrpCents: 3500,
+          gstBps: 1200,
+          lineTotalCents: lineGross + Math.round((lineGross * 1200) / 10000),
+        });
+      }
+      await tx.update(purchases).set({ subtotalCents: subtotal, taxCents: tax, totalCents: subtotal + tax }).where(eq(purchases.id, purchase.id));
+    });
+  }
+
+  const test = (await db.select().from(labTests).limit(1))[0];
+  if (test) {
+    await db.transaction(async (tx) => {
+      const orderNo = await nextFormattedNumber(tx, "lab_order");
+      const [order] = await tx.insert(labOrders).values({
+        orderNo,
+        patientId: created[1].id,
+        orderedBy: doctorUser?.id ?? null,
+        status: "ordered",
+        priority: "routine",
+        clinicalNotes: "Rule out anaemia",
+      }).returning();
+      await tx.insert(labOrderItems).values({ orderId: order.id, testId: test.id, status: "ordered" });
+    });
+  }
 }
 
 export { sequences };

@@ -2,6 +2,8 @@ import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { appointments, auditLogs, encounters, invoices, labOrders, medicineBatches, medicines, patients, payments } from "@/db/schema";
 
+/** Reports intentionally return aggregates only; row-level access goes through module APIs. */
+
 export async function reportPatients(from: Date, to: Date) {
   const db = getDb();
   const [row] = await db.select({ count: sql<number>`count(*)` }).from(patients).where(and(gte(patients.createdAt, from), lte(patients.createdAt, to)));
@@ -72,25 +74,33 @@ export async function reportAudit(from: Date, to: Date) {
   return db.select().from(auditLogs).where(and(gte(auditLogs.createdAt, from), lte(auditLogs.createdAt, to))).orderBy(desc(auditLogs.createdAt)).limit(500);
 }
 
-export async function dashboardFor(roleCode: string, userId: string) {
+export async function reportRevenue(from: Date, to: Date) {
   const db = getDb();
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const todayEnd = new Date();
-  todayEnd.setHours(23, 59, 59, 999);
-  const [patientCount] = await db.select({ c: sql<number>`count(*)` }).from(patients);
-  const [openInvoices] = await db.select({ c: sql<number>`count(*)` }).from(invoices).where(sql`${invoices.status} in ('open','partial')`);
-  const [todayAppt] = await db.select({ c: sql<number>`count(*)` }).from(appointments).where(and(gte(appointments.scheduledAt, todayStart), lte(appointments.scheduledAt, todayEnd)));
-  const [pendingLab] = await db.select({ c: sql<number>`count(*)` }).from(labOrders).where(sql`${labOrders.status} not in ('completed','cancelled')`);
-  const [todayRevenue] = await db.select({ c: sql<number>`coalesce(sum(${payments.amountCents}),0)` }).from(payments).where(and(gte(payments.receivedAt, todayStart), lte(payments.receivedAt, todayEnd)));
+  const [row] = await db
+    .select({
+      collectedCents: sql<number>`coalesce(sum(${payments.amountCents}),0)`,
+      paymentCount: sql<number>`count(*)`,
+    })
+    .from(payments)
+    .where(and(gte(payments.receivedAt, from), lte(payments.receivedAt, to)));
+  const byMethod = await db
+    .select({ method: payments.method, totalCents: sql<number>`coalesce(sum(${payments.amountCents}),0)` })
+    .from(payments)
+    .where(and(gte(payments.receivedAt, from), lte(payments.receivedAt, to)))
+    .groupBy(payments.method);
+  const [invoiceRow] = await db
+    .select({
+      invoiced: sql<number>`coalesce(sum(${invoices.totalCents}),0)`,
+      outstanding: sql<number>`coalesce(sum(${invoices.totalCents} - ${invoices.paidCents} + ${invoices.refundedCents}),0)`,
+    })
+    .from(invoices)
+    .where(and(gte(invoices.createdAt, from), lte(invoices.createdAt, to), sql`${invoices.status} <> 'cancelled'`));
   return {
-    roleCode,
-    userId,
-    patientCount: Number(patientCount?.c ?? 0),
-    todayAppointments: Number(todayAppt?.c ?? 0),
-    openInvoices: Number(openInvoices?.c ?? 0),
-    pendingLab: Number(pendingLab?.c ?? 0),
-    todayRevenueCents: Number(todayRevenue?.c ?? 0),
+    collectedCents: Number(row?.collectedCents ?? 0),
+    paymentCount: Number(row?.paymentCount ?? 0),
+    invoicedCents: Number(invoiceRow?.invoiced ?? 0),
+    outstandingCents: Number(invoiceRow?.outstanding ?? 0),
+    byMethod,
   };
 }
 
