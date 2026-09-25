@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Synapse HMS — offline</title>
+    <style>
+      body { font-family: Segoe UI, sans-serif; background:#0f172a; color:#e2e8f0; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
+      .card { background:#1e293b; padding:32px; border-radius:12px; max-width:480px; }
+      input, button { width:100%; padding:10px; margin-top:8px; border-radius:6px; border:0; }
+      button { background:#0f766e; color:white; font-weight:600; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Cannot reach HMS server</h1>
+      <p>The desktop client could not load the hospital server. Confirm the server PC is on the LAN and the address below is correct.</p>
+      <input id="url" placeholder="http://192.168.1.10:3000" />
+      <button id="save">Save and retry</button>
+    </div>
+    <script>
+      document.getElementById("save").onclick = async () => {
+        const url = document.getElementById("url").value;
+        await window.hmsDesktop.setServer(url);
+        location.reload();
+      };
+    </script>
+  </body>
+</html>
