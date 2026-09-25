@@ -10,6 +10,10 @@ export default defineConfig({
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:3000",
     trace: "on-first-retry",
+    // Opt-in capture so the same specs can produce walkthrough evidence.
+    video: process.env.PW_CAPTURE ? "on" : "off",
+    screenshot: process.env.PW_CAPTURE ? "on" : "off",
+    viewport: { width: 1440, height: 900 },
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
