@@ -11,7 +11,12 @@ const patientSchema = z.object({
   firstName: z.string().min(1).max(80),
   lastName: z.string().min(1).max(80),
   sex: z.enum(["male", "female", "other", "unknown"]),
-  dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date of birth must be YYYY-MM-DD").refine((value) => {
+    const [y, m, d] = value.split("-").map(Number);
+    if (y < 1900 || y > new Date().getUTCFullYear()) return false;
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+  }, "Date of birth is not a real calendar date"),
   bloodGroup: z.string().max(8).optional().nullable(),
   nationalId: z.string().max(40).optional().nullable(),
   address: z.string().max(300).optional().nullable(),

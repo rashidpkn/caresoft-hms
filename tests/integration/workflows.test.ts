@@ -61,6 +61,12 @@ describe("clinical + pharmacy + billing workflows", () => {
       phone: "9999999999",
     });
     expect(patient.mrn).toMatch(/^MRN/);
+    await expect(registerPatient(reception, {
+      firstName: "Bad",
+      lastName: "Date",
+      sex: "female",
+      dateOfBirth: "12/09/20514",
+    })).rejects.toBeTruthy();
     const docs = await listDoctors();
     const doc = docs[0];
     const scheduledAt = new Date();

@@ -31,11 +31,21 @@ export function handleError(err: unknown): NextResponse {
   if (err instanceof AppError) {
     return json({ ok: false, error: { code: err.code, message: err.message, details: err.details ?? null } }, { status: err.status });
   }
+  if (isZodError(err)) {
+    const first = err.issues[0];
+    const path = first?.path?.join(".") || "body";
+    const message = first?.message ? `${path}: ${first.message}` : "Invalid request";
+    return json({ ok: false, error: { code: "validation_error", message, details: err.issues } }, { status: 400 });
+  }
   console.error(err);
   return json(
     { ok: false, error: { code: "internal_error", message: "An unexpected error occurred. Contact the administrator if this continues." } },
     { status: 500 },
   );
+}
+
+function isZodError(err: unknown): err is { issues: { message: string; path: PropertyKey[] }[] } {
+  return Boolean(err && typeof err === "object" && "issues" in err && Array.isArray((err as { issues: unknown }).issues) && (err as { name?: string }).name === "ZodError");
 }
 
 export async function readJson<T>(req: Request): Promise<T> {
