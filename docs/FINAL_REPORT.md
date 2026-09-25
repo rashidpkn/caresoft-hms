@@ -20,6 +20,10 @@ Next.js 15, React 19, TypeScript (strict), Tailwind CSS 4, TanStack Query, React
 - RBAC with 12 roles and fine-grained permissions
 - User / department / designation / doctor administration
 - Patients, appointments, queue, encounters (draft lock on finalize), prescriptions
+- Reception front desk: slot booking, check-in tokens, consultation-fee billing
+- Doctor clinic: personal queue, vitals, diagnoses, prescriptions, lab orders from the encounter
+- Pharmacy counter: FEFO stock, cart, paid sale, bounded returns (store manager still owns purchases)
+- Laboratory worklist: collect → receive → enter → independent verify
 - Pharmacy catalogue, purchases, batches, concurrent-safe sales, returns, adjustments
 - Central billing (invoices, partial payments, refunds, cancel)
 - Laboratory order → sample → result → independent verification
